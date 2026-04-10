@@ -100,7 +100,7 @@ int ntfs_map_runlist_nolock(struct ntfs_inode *ni, s64 vcn, struct ntfs_attr_sea
 	struct page *put_this_page = NULL;
 #endif
 	int err = 0;
-	bool ctx_is_temporary = false, ctx_needs_reset;
+	bool ctx_is_temporary = false, ctx_needs_reset = false;
 	struct ntfs_attr_search_ctx old_ctx = { NULL, };
 	size_t new_rl_count;
 
