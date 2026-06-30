@@ -1255,7 +1255,9 @@ static int ntfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 
 	ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	ni = __ntfs_create(idmap, dir, uname, uname_len, mode, 0, NULL, 0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 	ni = __ntfs_create(idmap, dir, uname, uname_len, S_IFDIR | mode, 0, NULL, 0);
 #else
 	ni = __ntfs_create(mnt_userns, dir, uname, uname_len, S_IFDIR | mode, 0, NULL, 0);
