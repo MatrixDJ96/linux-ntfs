@@ -480,10 +480,19 @@ static int ntfs_seek_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
 }
 
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 6)
+static DEFINE_IOMAP_ITER_NEXT_END(ntfs_zero_read_iomap_next,
+		ntfs_seek_iomap_begin, ntfs_zero_read_iomap_end);
+
+static const struct iomap_ops ntfs_zero_read_iomap_ops = {
+	.iomap_next = ntfs_zero_read_iomap_next,
+};
+#else
 static const struct iomap_ops ntfs_zero_read_iomap_ops = {
 	.iomap_begin = ntfs_seek_iomap_begin,
 	.iomap_end = ntfs_zero_read_iomap_end,
 };
+#endif
 #else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static int ntfs_zero_read_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
@@ -514,6 +523,21 @@ static const struct iomap_ops ntfs_zero_read_iomap_ops = {
 #endif
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 6)
+static DEFINE_IOMAP_ITER_NEXT_END(ntfs_read_iomap_next,
+		ntfs_read_iomap_begin, ntfs_read_iomap_end);
+
+const struct iomap_ops ntfs_read_iomap_ops = {
+	.iomap_next = ntfs_read_iomap_next,
+};
+
+static DEFINE_IOMAP_ITER_NEXT_END(ntfs_seek_iomap_next,
+		ntfs_seek_iomap_begin, ntfs_read_iomap_end);
+
+const struct iomap_ops ntfs_seek_iomap_ops = {
+	.iomap_next = ntfs_seek_iomap_next,
+};
+#else
 const struct iomap_ops ntfs_read_iomap_ops = {
 	.iomap_begin = ntfs_read_iomap_begin,
 	.iomap_end = ntfs_read_iomap_end,
@@ -523,6 +547,7 @@ const struct iomap_ops ntfs_seek_iomap_ops = {
 	.iomap_begin = ntfs_seek_iomap_begin,
 	.iomap_end = ntfs_read_iomap_end,
 };
+#endif
 
 int ntfs_dio_zero_range(struct inode *inode, loff_t offset, loff_t length)
 {
@@ -967,10 +992,19 @@ static int ntfs_write_iomap_end(struct inode *inode, loff_t pos, loff_t length,
 	return written;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 6)
+static DEFINE_IOMAP_ITER_NEXT_END(ntfs_write_iomap_next,
+		ntfs_write_iomap_begin, ntfs_write_iomap_end);
+
+const struct iomap_ops ntfs_write_iomap_ops = {
+	.iomap_next		= ntfs_write_iomap_next,
+};
+#else
 const struct iomap_ops ntfs_write_iomap_ops = {
 	.iomap_begin		= ntfs_write_iomap_begin,
 	.iomap_end		= ntfs_write_iomap_end,
 };
+#endif
 
 static int ntfs_page_mkwrite_iomap_begin(struct inode *inode, loff_t offset,
 				  loff_t length, unsigned int flags,
@@ -980,10 +1014,19 @@ static int ntfs_page_mkwrite_iomap_begin(struct inode *inode, loff_t offset,
 			NTFS_IOMAP_FLAGS_MKWRITE);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 6)
+static DEFINE_IOMAP_ITER_NEXT_END(ntfs_page_mkwrite_iomap_next,
+		ntfs_page_mkwrite_iomap_begin, ntfs_write_iomap_end);
+
+const struct iomap_ops ntfs_page_mkwrite_iomap_ops = {
+	.iomap_next		= ntfs_page_mkwrite_iomap_next,
+};
+#else
 const struct iomap_ops ntfs_page_mkwrite_iomap_ops = {
 	.iomap_begin		= ntfs_page_mkwrite_iomap_begin,
 	.iomap_end		= ntfs_write_iomap_end,
 };
+#endif
 
 static int ntfs_dio_iomap_begin(struct inode *inode, loff_t offset,
 				  loff_t length, unsigned int flags,
@@ -993,10 +1036,19 @@ static int ntfs_dio_iomap_begin(struct inode *inode, loff_t offset,
 			NTFS_IOMAP_FLAGS_DIO);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 6)
+static DEFINE_IOMAP_ITER_NEXT_END(ntfs_dio_iomap_next,
+		ntfs_dio_iomap_begin, ntfs_write_iomap_end);
+
+const struct iomap_ops ntfs_dio_iomap_ops = {
+	.iomap_next		= ntfs_dio_iomap_next,
+};
+#else
 const struct iomap_ops ntfs_dio_iomap_ops = {
 	.iomap_begin		= ntfs_dio_iomap_begin,
 	.iomap_end		= ntfs_write_iomap_end,
 };
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static ssize_t ntfs_writeback_range(struct iomap_writepage_ctx *wpc,
