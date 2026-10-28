@@ -136,6 +136,17 @@ static bool valid_reparse_buffer(struct ntfs_inode *ni,
 	if (!(reparse_attr->reparse_tag & IO_REPARSE_TAG_IS_MICROSOFT))
 		expected += sizeof(struct guid);
 
+	/*
+	 * AF_UNIX has no payload in either its WSL or native form. The
+	 * 16-byte field in the Windows-native form is treated as opaque.
+	 */
+	if (reparse_attr->reparse_tag == IO_REPARSE_TAG_AF_UNIX) {
+		if (le16_to_cpu(reparse_attr->reparse_data_length))
+			return false;
+		if (size == expected + sizeof(struct guid))
+			return true;
+	}
+
 	/* Buffer must exactly match the expected size */
 	return expected == size;
 }
@@ -143,9 +154,10 @@ static bool valid_reparse_buffer(struct ntfs_inode *ni,
 /*
  * Do some sanity checks on reparse data
  *
- * Microsoft reparse points have an 8-byte header whereas
- * non-Microsoft reparse points have a 24-byte header.  In each case,
- * 'reparse_data_length' must equal the number of non-header bytes.
+ * Microsoft reparse points normally have an 8-byte header. The
+ * Windows-native AF_UNIX form may append an opaque 16-byte GUID area,
+ * while non-Microsoft reparse points have a 24-byte header. In each
+ * case, 'reparse_data_length' must equal the number of non-header bytes.
  *
  * If the reparse data looks like a junction point or symbolic
  * link, more checks can be done.
@@ -220,6 +232,9 @@ static bool valid_reparse_data(struct ntfs_inode *ni,
 		break;
 	}
 	case IO_REPARSE_TAG_AF_UNIX:
+		if (!valid_reparse_buffer(ni, reparse_attr, size, 0))
+			return false;
+		break;
 	case IO_REPARSE_TAG_LX_FIFO:
 	case IO_REPARSE_TAG_LX_CHR:
 	case IO_REPARSE_TAG_LX_BLK:
