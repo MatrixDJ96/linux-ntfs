@@ -833,12 +833,9 @@ static int ntfs_ib_read(struct ntfs_index_context *icx, s64 vcn, struct index_bl
 
 	ret = ntfs_inode_attr_pread(VFS_I(icx->ia_ni), pos, icx->block_size, (u8 *)dst);
 	if (ret != icx->block_size) {
-		if (ret == -1)
-			ntfs_error(icx->idx_ni->vol->sb, "Failed to read index block");
-		else
-			ntfs_error(icx->idx_ni->vol->sb,
-				"Failed to read full index block at %lld\n", pos);
-		return -EIO;
+		ntfs_error(icx->idx_ni->vol->sb,
+			"Failed to read full index block at %lld\n", pos);
+		return ret < 0 ? (int)ret : -EIO;
 	}
 
 	post_read_mst_fixup((struct ntfs_record *)((u8 *)dst), icx->block_size);
@@ -979,10 +976,9 @@ descend_into_child_node:
 
 	ntfs_debug("Descend into node with s64 %lld.\n", vcn);
 
-	if (ntfs_ib_read(icx, vcn, ib)) {
-		err = -EIO;
+	err = ntfs_ib_read(icx, vcn, ib);
+	if (err)
 		goto err_out;
-	}
 	err = ntfs_ie_lookup(key, key_len, icx, &ib->index, &vcn, &ie);
 	if (err != -EAGAIN) {
 		if (err == -EINVAL || err == -ERANGE)
@@ -1119,6 +1115,7 @@ static int ntfs_ibm_add(struct ntfs_index_context *icx)
 static int ntfs_ibm_modify(struct ntfs_index_context *icx, s64 vcn, int set)
 {
 	u8 byte;
+	s64 bytes;
 	u64 pos = ntfs_ibm_vcn_to_pos(icx, vcn);
 	u32 bpos = pos / 8;
 	u32 bit = 1 << (pos % 8);
@@ -1147,8 +1144,9 @@ static int ntfs_ibm_modify(struct ntfs_index_context *icx, s64 vcn, int set)
 		}
 	}
 
-	if (ntfs_inode_attr_pread(bmp_vi, bpos, 1, &byte) != 1) {
-		ret = -EIO;
+	bytes = ntfs_inode_attr_pread(bmp_vi, bpos, 1, &byte);
+	if (bytes != 1) {
+		ret = bytes < 0 ? (int)bytes : -EIO;
 		ntfs_error(icx->idx_ni->vol->sb, "Failed to read $BITMAP");
 		goto err;
 	}

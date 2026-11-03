@@ -1120,6 +1120,7 @@ bool ntfs_attr_list_is_valid(const u8 *al_start, s64 size)
 int load_attribute_list(struct ntfs_inode *base_ni, u8 *al_start, const s64 size)
 {
 	struct inode *attr_vi = NULL;
+	s64 bytes;
 
 	if (!al_start || size <= 0)
 		return -EINVAL;
@@ -1132,12 +1133,13 @@ int load_attribute_list(struct ntfs_inode *base_ni, u8 *al_start, const s64 size
 		return PTR_ERR(attr_vi);
 	}
 
-	if (ntfs_inode_attr_pread(attr_vi, 0, size, al_start) != size) {
+	bytes = ntfs_inode_attr_pread(attr_vi, 0, size, al_start);
+	if (bytes != size) {
 		iput(attr_vi);
 		ntfs_error(base_ni->vol->sb,
 			   "Failed to read attribute list, mft = %llu",
 			   base_ni->mft_no);
-		return -EIO;
+		return bytes < 0 ? (int)bytes : -EIO;
 	}
 	iput(attr_vi);
 
@@ -1558,7 +1560,7 @@ corrupt:
 		err = -EIO;
 	}
 
-	if (err != -ENOMEM)
+	if (err != -ENOMEM && err != -EINTR && err != -ERESTARTSYS)
 		NVolSetErrors(vol);
 	return err;
 not_found:

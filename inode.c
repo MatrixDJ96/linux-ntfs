@@ -3178,7 +3178,7 @@ unm_err_out:
 	unmap_mft_record(ni);
 	mutex_unlock(&ni->mrec_lock);
 err_out:
-	if (err == -ENOMEM)
+	if (err == -ENOMEM || err == -EINTR || err == -ERESTARTSYS)
 		mark_inode_dirty(vi);
 	else {
 		ntfs_error(vi->i_sb, "Failed (error %i):  Run chkdsk.", -err);
@@ -3909,8 +3909,10 @@ s64 ntfs_inode_attr_pread(struct inode *vi, s64 pos, s64 count, u8 *buf)
 	do {
 		/* Update @index and get the next folio. */
 		folio = read_mapping_folio(mapping, index, NULL);
-		if (IS_ERR(folio))
+		if (IS_ERR(folio)) {
+			err = PTR_ERR(folio);
 			break;
+		}
 
 		offset = offset_in_folio(folio, pos);
 		attr_len = min_t(size_t, (size_t)count, folio_size(folio) - offset);
@@ -3930,8 +3932,10 @@ s64 ntfs_inode_attr_pread(struct inode *vi, s64 pos, s64 count, u8 *buf)
 	do {
 		/* Update @index and get the next page. */
 		page = read_mapping_page(mapping, index, NULL);
-		if (IS_ERR(page))
+		if (IS_ERR(page)) {
+			err = PTR_ERR(page);
 			break;
+		}
 		addr = page_address(page);
 		offset = pos % PAGE_SIZE;
 		attr_len = PAGE_SIZE - offset;

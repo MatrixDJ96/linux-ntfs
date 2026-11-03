@@ -100,7 +100,13 @@ void __ntfs_error(const char *function, struct super_block *sb,
 #endif
 	va_end(args);
 
-	if (sb)
+	/*
+	 * A task being killed fails its reads with -EINTR and most callers report
+	 * that as an error. Nothing here can tell it from a real fault, so the
+	 * errors= policy waits for a report from a task that is not dying; callers
+	 * still record real faults with NVolSetErrors().
+	 */
+	if (sb && !fatal_signal_pending(current))
 		ntfs_handle_error(sb);
 }
 
