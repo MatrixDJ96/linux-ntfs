@@ -1,0 +1,125 @@
+name: Test on bazzite-mx kernels
+
+# Runs the c-cpp.yml tests on the kernels bazzite-mx ships, for this branch and for plain
+# ntfs-next, and compares the results.
+
+on:
+  push:
+    branches:
+    - bazzite-mx
+    tags:
+    - test-*
+  workflow_dispatch:
+
+concurrency:
+  group: bazzite-mx-vmtest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernels:
+    name: Kernels to test
+    runs-on: ubuntu-26.04
+    outputs:
+      kernels: ${{ steps.list.outputs.kernels }}
+    steps:
+    - name: List kernels to test
+      id: list
+      run: |
+        set -euo pipefail
+        {
+          for image in bazzite bazzite-nvidia bazzite-nvidia-open; do
+            skopeo inspect --no-tags "docker://ghcr.io/ublue-os/$image:stable" \
+              | jq -er '.Labels["ostree.linux"]'
+          done
+          skopeo list-tags docker://ghcr.io/ublue-os/akmods | jq -r '.Tags[]' \
+            | sed -n 's/^ogc-[0-9]*-\([0-9.]*-ogc.*\.x86_64\)$/\1/p' | sort -V | tail -n 1
+        } | sort -uV > kernels.txt
+        cat kernels.txt
+        echo "kernels=$(jq -Rnc '[inputs | {release: ., version: sub("-.*"; "")}]' \
+          < kernels.txt)" >> "$GITHUB_OUTPUT"
+
+  vm:
+    name: ${{ matrix.variant }} on ${{ matrix.kernel.version }}
+    needs: kernels
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJSON(needs.kernels.outputs.kernels) }}
+        variant: [bazzite-mx, ntfs-next]
+    env:
+      K: ${{ matrix.kernel.release }}
+      W: /mnt/vmtest
+      VM: >-
+        /mnt/vmtest/kroot ${{ matrix.kernel.release }} /mnt/vmtest/src/ntfs.ko ${{ matrix.variant }}
+        /mnt/vmtest/root.raw /mnt/vmtest/tests.txt /mnt/vmtest/out
+    steps:
+    - name: Check out test scripts
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        path: harness
+    - name: Get ${{ matrix.variant }} module source
+      run: |
+        sudo mkdir -p "$W" && sudo chown "$USER" "$W"
+        harness/.github/vmtest/get-source.sh ${{ matrix.variant }} harness "$W/src"
+    - name: Get Bazzite kernel ${{ matrix.kernel.version }}
+      run: harness/.github/vmtest/get-kernel.sh "$K" "$W/rpms"
+    - name: Build module for ${{ matrix.kernel.version }}
+      run: harness/.github/vmtest/build-module.sh "$K" "$W/src" "$W/rpms" "$W/kroot"
+    - name: Build test VM with xfstests
+      id: prereq
+      run: harness/.github/vmtest/prepare-vm.sh harness "$W"
+    - name: Run compression tests
+      timeout-minutes: 20
+      run: harness/.github/vmtest/run-vm.sh compression $VM
+    - name: Run file and directory tests
+      if: ${{ !cancelled() && steps.prereq.outcome == 'success' }}
+      timeout-minutes: 20
+      run: harness/.github/vmtest/run-vm.sh file-dir $VM
+    - name: Run xfstests on 4K clusters
+      if: ${{ !cancelled() && steps.prereq.outcome == 'success' }}
+      timeout-minutes: 290
+      run: harness/.github/vmtest/run-vm.sh xfstests $VM
+    - name: Upload test logs
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: always()
+      with:
+        name: ${{ matrix.variant }}-${{ matrix.kernel.version }}
+        path: /mnt/vmtest/out/*.log
+
+  compare:
+    name: Compare results
+    needs: [kernels, vm]
+    if: always() && needs.vm.result != 'skipped'
+    runs-on: ubuntu-26.04
+    steps:
+    - name: Check out test scripts
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Download test logs
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        path: logs
+    - name: Compare results with ntfs-next
+      run: |
+        set -o pipefail
+        mapfile -t kernels < <(jq -r '.[].version' <<< '${{ needs.kernels.outputs.kernels }}')
+        .github/vmtest/compare-results.sh logs "${kernels[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  tag:
+    name: Tag stable
+    needs: compare
+    if: ${{ !cancelled() && needs.compare.result == 'success' && github.ref == 'refs/heads/bazzite-mx' }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+    - name: Move stable tag to this commit
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        ref=repos/$GITHUB_REPOSITORY/git/refs
+        gh api -X PATCH "$ref/tags/stable" -f sha="$GITHUB_SHA" -F force=true > /dev/null \
+          || gh api "$ref" -f ref=refs/tags/stable -f sha="$GITHUB_SHA" > /dev/null
+        echo "stable is $GITHUB_SHA"
