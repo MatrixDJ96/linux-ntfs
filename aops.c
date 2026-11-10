@@ -573,6 +573,84 @@ static void ntfs_readahead(struct readahead_control *rac)
 #endif
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+/*
+ * ntfs_write_resident_folio - copy a dirty resident folio to the mft record
+ * @mapping:	address space of a resident file
+ * @wbc:	writeback control structure
+ *
+ * A store through a shared mapping dirties folio 0 of a resident file, and
+ * only this copy brings it to the attribute value.  mrec_lock is taken before
+ * the folio lock, as ntfs_attr_make_non_resident() does.
+ *
+ * Return: 0 or -errno, or 1 if the file is no longer resident.
+ */
+static int ntfs_write_resident_folio(struct address_space *mapping,
+				     struct writeback_control *wbc)
+{
+	struct ntfs_inode *ni = NTFS_I(mapping->host);
+	struct ntfs_inode *base_ni = ntfs_base_inode(ni);
+	struct ntfs_attr_search_ctx *ctx;
+	struct folio *folio;
+	s64 attr_len;
+	int err = 0;
+
+	if ((NInoAttr(ni) && !ntfs_inode_is_named_stream(ni)) ||
+	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
+		return 0;
+
+	mutex_lock(&base_ni->mrec_lock);
+	if (NInoNonResident(ni)) {
+		mutex_unlock(&base_ni->mrec_lock);
+		return 1;
+	}
+
+	folio = filemap_lock_folio(mapping, 0);
+	if (IS_ERR(folio))
+		goto out;
+	if (!folio_clear_dirty_for_io(folio))
+		goto out_folio;
+	/* Only starting writeback clears the page cache dirty tag. */
+	folio_start_writeback(folio);
+
+	ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
+	if (!ctx) {
+		err = -ENOMEM;
+		goto redirty;
+	}
+
+	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len,
+			       CASE_SENSITIVE, 0, NULL, 0, ctx);
+	if (err) {
+		if (err == -ENOENT)
+			err = -EIO;
+		ntfs_attr_put_search_ctx(ctx);
+		goto redirty;
+	}
+
+	attr_len = le32_to_cpu(ctx->attr->data.resident.value_length);
+	attr_len = min3(attr_len, i_size_read(mapping->host),
+			(s64)folio_size(folio));
+	memcpy_from_folio((u8 *)ctx->attr +
+			  le16_to_cpu(ctx->attr->data.resident.value_offset),
+			  folio, 0, attr_len);
+	mark_mft_record_dirty(ctx->ntfs_ino);
+	ntfs_attr_put_search_ctx(ctx);
+	goto end_writeback;
+
+redirty:
+	folio_redirty_for_writepage(wbc, folio);
+end_writeback:
+	folio_end_writeback(folio);
+out_folio:
+	folio_unlock(folio);
+	folio_put(folio);
+out:
+	mutex_unlock(&base_ni->mrec_lock);
+	return err;
+}
+#endif
+
 static int ntfs_writepages(struct address_space *mapping,
 		struct writeback_control *wbc)
 {
@@ -593,8 +671,16 @@ static int ntfs_writepages(struct address_space *mapping,
 	if (NVolShutdown(ni->vol))
 		return -EIO;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	if (!NInoNonResident(ni)) {
+		ret = ntfs_write_resident_folio(mapping, wbc);
+		if (ret <= 0)
+			return ret;
+	}
+#else
 	if (!NInoNonResident(ni))
 		return 0;
+#endif
 
 	/*
 	 * EFS-encrypted files are not supported.
