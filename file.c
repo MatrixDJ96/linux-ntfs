@@ -1086,6 +1086,37 @@ out_lock:
 	return ret;
 }
 
+/*
+ * A resident attribute has no blocks to map, so dirty the folio without
+ * iomap: its ->iomap_begin takes mrec_lock under the folio lock, while
+ * ntfs_attr_make_non_resident() locks folio 0 under mrec_lock.  Returns 0
+ * when the attribute became non-resident, for iomap to handle.
+ */
+static vm_fault_t ntfs_resident_page_mkwrite(struct vm_fault *vmf,
+					     struct inode *inode)
+{
+	struct folio *folio = page_folio(vmf->page);
+
+	if (NVolShutdown(NTFS_I(inode)->vol))
+		return VM_FAULT_SIGBUS;
+
+	folio_lock(folio);
+	if (folio_mkwrite_check_truncate(folio, inode) < 0) {
+		folio_unlock(folio);
+		return VM_FAULT_NOPAGE;
+	}
+
+	/* The conversion marks the inode non-resident before it unlocks folio 0. */
+	if (NInoNonResident(NTFS_I(inode))) {
+		folio_unlock(folio);
+		return 0;
+	}
+
+	folio_mark_dirty(folio);
+	folio_wait_stable(folio);
+	return VM_FAULT_LOCKED;
+}
+
 static vm_fault_t ntfs_filemap_page_mkwrite(struct vm_fault *vmf)
 {
 	struct inode *inode = file_inode(vmf->vma->vm_file);
@@ -1114,11 +1145,16 @@ static vm_fault_t ntfs_filemap_page_mkwrite(struct vm_fault *vmf)
 	 * exclusively while invalidating pagecache and changing extents.
 	 */
 	filemap_invalidate_lock_shared(mapping);
+	ret = 0;
+	if (!NInoNonResident(NTFS_I(inode)))
+		ret = ntfs_resident_page_mkwrite(vmf, inode);
+	if (!ret) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
-	ret = iomap_page_mkwrite(vmf, &ntfs_page_mkwrite_iomap_ops, NULL);
+		ret = iomap_page_mkwrite(vmf, &ntfs_page_mkwrite_iomap_ops, NULL);
 #else
-	ret = iomap_page_mkwrite(vmf, &ntfs_page_mkwrite_iomap_ops);
+		ret = iomap_page_mkwrite(vmf, &ntfs_page_mkwrite_iomap_ops);
 #endif
+	}
 	filemap_invalidate_unlock_shared(mapping);
 
 	sb_end_pagefault(inode->i_sb);

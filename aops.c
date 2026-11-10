@@ -120,6 +120,74 @@ static const struct iomap_read_ops ntfs_iomap_bio_read_ops = {
 #endif
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+/*
+ * ntfs_read_resident_folio - copy a resident attribute value into a folio
+ * @folio:	locked page cache folio to fill
+ *
+ * ntfs_attr_make_non_resident() locks folio 0 while holding mrec_lock, so
+ * waiting here for mrec_lock under the folio lock can deadlock.  Only try
+ * the lock; if it is busy, unlock the folio, wait for the holder and let the
+ * caller look the folio up again.
+ *
+ * Return: 0 on success, AOP_TRUNCATED_PAGE to retry, or -errno on error.
+ */
+static int ntfs_read_resident_folio(struct folio *folio)
+{
+	struct ntfs_inode *base_ni, *ni = NTFS_I(folio->mapping->host);
+	struct ntfs_attr_search_ctx *ctx;
+	s64 attr_len = 0;
+	int err;
+
+	if (NInoAttr(ni))
+		base_ni = ni->ext.base_ntfs_ino;
+	else
+		base_ni = ni;
+
+	if (!mutex_trylock(&base_ni->mrec_lock)) {
+		folio_unlock(folio);
+		mutex_lock(&base_ni->mrec_lock);
+		mutex_unlock(&base_ni->mrec_lock);
+		return AOP_TRUNCATED_PAGE;
+	}
+
+	/* Made non-resident before the lock was taken: read it through iomap. */
+	if (NInoNonResident(ni)) {
+		mutex_unlock(&base_ni->mrec_lock);
+		folio_unlock(folio);
+		return AOP_TRUNCATED_PAGE;
+	}
+
+	ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
+	if (!ctx) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len,
+			       CASE_SENSITIVE, 0, NULL, 0, ctx);
+	if (err == -ENOENT)
+		err = -EIO;
+	if (!err && !folio->index) {
+		attr_len = le32_to_cpu(ctx->attr->data.resident.value_length);
+		attr_len = min3(attr_len, ni->initialized_size,
+				i_size_read(VFS_I(ni)));
+		memcpy_to_folio(folio, 0, (u8 *)ctx->attr +
+				le16_to_cpu(ctx->attr->data.resident.value_offset),
+				attr_len);
+	}
+	ntfs_attr_put_search_ctx(ctx);
+out:
+	mutex_unlock(&base_ni->mrec_lock);
+	if (!err) {
+		folio_zero_segment(folio, attr_len, folio_size(folio));
+		folio_mark_uptodate(folio);
+	}
+	folio_unlock(folio);
+	return err;
+}
+#endif
+
 /*
  * ntfs_read_folio - Read data for a folio from the device
  * @file:	open file to which the folio @folio belongs or NULL
@@ -132,10 +200,12 @@ static const struct iomap_read_ops ntfs_iomap_bio_read_ops = {
  *   decryption is not supported in this path.
  * - If the attribute is non-resident and compressed, the read operation is
  *   delegated to ntfs_read_compressed_block().
- * - For normal resident or non-resident attribute, it utilizes the generic
- *   iomap infrastructure via iomap_bio_read_folio() to perform the I/O.
+ * - From 6.6 on, a resident attribute is copied by
+ *   ntfs_read_resident_folio().
+ * - Otherwise, it utilizes the generic iomap infrastructure via
+ *   iomap_bio_read_folio() to perform the I/O.
  *
- * Return: 0 on success, or -errno on error.
+ * Return: 0 on success, AOP_TRUNCATED_PAGE to retry, or -errno on error.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 static int ntfs_read_folio(struct file *file, struct folio *folio)
@@ -181,6 +251,9 @@ static int ntfs_readpage(struct file *file, struct page *page)
 		if (NInoNonResident(ni) && NInoCompressed(ni))
 			return ntfs_read_compressed_block(folio);
 	}
+
+	if (!NInoNonResident(ni))
+		return ntfs_read_resident_folio(folio);
 #else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 	struct page *page = &folio->page;
