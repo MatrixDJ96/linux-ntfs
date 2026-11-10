@@ -27,6 +27,7 @@
 #endif
 
 #include "lcnalloc.h"
+#include "mft.h"
 #include "ntfs.h"
 #include "reparse.h"
 #include "ea.h"
@@ -1455,6 +1456,46 @@ out:
 	return err;
 }
 
+/*
+ * Zero part of a resident value in the mft record itself; the caller has
+ * written back and dropped the page cache.
+ */
+static int ntfs_resident_punch_hole(struct ntfs_inode *ni, loff_t offset,
+				    loff_t end)
+{
+	struct ntfs_inode *base_ni = ntfs_base_inode(ni);
+	struct ntfs_attr_search_ctx *ctx;
+	u32 attr_len;
+	int err;
+
+	mutex_lock_nested(&base_ni->mrec_lock, NTFS_INODE_MUTEX_NORMAL);
+	ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
+	if (!ctx) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len,
+			       CASE_SENSITIVE, 0, NULL, 0, ctx);
+	if (err) {
+		if (err == -ENOENT)
+			err = -EIO;
+	} else {
+		attr_len = le32_to_cpu(ctx->attr->data.resident.value_length);
+		end = min_t(loff_t, end, attr_len);
+		if (offset < end) {
+			memset((u8 *)ctx->attr +
+			       le16_to_cpu(ctx->attr->data.resident.value_offset) +
+			       offset, 0, end - offset);
+			mark_mft_record_dirty(ctx->ntfs_ino);
+		}
+	}
+	ntfs_attr_put_search_ctx(ctx);
+out:
+	mutex_unlock(&base_ni->mrec_lock);
+	return err;
+}
+
 static int ntfs_punch_hole(struct ntfs_inode *ni, int mode, loff_t offset,
 		loff_t len)
 {
@@ -1485,6 +1526,11 @@ static int ntfs_punch_hole(struct ntfs_inode *ni, int mode, loff_t offset,
 	if (err)
 		goto out;
 	truncate_pagecache(vi, offset_down);
+
+	if (!NInoNonResident(ni)) {
+		err = ntfs_resident_punch_hole(ni, offset, end_offset);
+		goto out;
+	}
 
 	start_vcn = ntfs_bytes_to_cluster(vol, offset);
 	end_vcn = ntfs_bytes_to_cluster(vol, end_offset - 1) + 1;
