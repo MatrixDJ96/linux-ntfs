@@ -218,6 +218,7 @@ static int ntfs_read_iomap_begin_resident(struct inode *inode, loff_t offset,
 	u32 attr_len;
 	int err = 0;
 	char *kattr;
+	struct page *ipage;
 
 	base_ni = ntfs_base_inode(ni);
 	mutex_lock(&base_ni->mrec_lock);
@@ -256,20 +257,22 @@ static int ntfs_read_iomap_begin_resident(struct inode *inode, loff_t offset,
 
 	kattr = (u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset);
 
+	ipage = alloc_page(GFP_NOFS | __GFP_ZERO);
+	if (!ipage) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	memcpy(page_address(ipage), kattr, attr_len);
 	iomap->type = IOMAP_INLINE;
-	iomap->inline_data = kattr;
+	iomap->inline_data = page_address(ipage);
 	iomap->offset = 0;
 	iomap->length = attr_len;
+	iomap->private = ipage;
 
 out:
 	if (ctx)
 		ntfs_attr_put_search_ctx(ctx);
-
-	if (!err && keep_mrec_lock && iomap->type == IOMAP_INLINE) {
-		iomap->private = base_ni;
-		return 0;
-	}
-
 	mutex_unlock(&base_ni->mrec_lock);
 	return err;
 }
@@ -444,12 +447,8 @@ static int __ntfs_read_iomap_begin(struct inode *inode, loff_t offset, loff_t le
 static int ntfs_read_iomap_end(struct inode *inode, loff_t pos, loff_t length,
 		ssize_t written, unsigned int flags, struct iomap *iomap)
 {
-	if (iomap->type == IOMAP_INLINE) {
-		struct ntfs_inode *base_ni = iomap->private;
-
-		if (base_ni)
-			mutex_unlock(&base_ni->mrec_lock);
-	}
+	if (iomap->type == IOMAP_INLINE)
+		put_page(iomap->private);
 
 	return written;
 }
@@ -457,6 +456,9 @@ static int ntfs_read_iomap_end(struct inode *inode, loff_t pos, loff_t length,
 static int ntfs_zero_read_iomap_end(struct inode *inode, loff_t pos, loff_t length,
 		ssize_t written, unsigned int flags, struct iomap *iomap)
 {
+	if (iomap->type == IOMAP_INLINE)
+		put_page(iomap->private);
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 	if ((flags & IOMAP_ZERO) && (iomap->flags & IOMAP_F_STALE))
 		return -EPERM;
@@ -888,6 +890,7 @@ static int ntfs_write_iomap_begin_resident(struct inode *inode, loff_t offset,
 	u32 attr_len;
 	int err = 0;
 	char *kattr;
+	struct page *ipage;
 
 	ctx = ntfs_attr_get_search_ctx(mrec_ni, NULL);
 	if (!ctx) {
@@ -908,18 +911,24 @@ static int ntfs_write_iomap_begin_resident(struct inode *inode, loff_t offset,
 	attr_len = le32_to_cpu(a->data.resident.value_length);
 	kattr = (u8 *)a + le16_to_cpu(a->data.resident.value_offset);
 
+	ipage = alloc_page(GFP_NOFS | __GFP_ZERO);
+	if (!ipage) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	memcpy(page_address(ipage), kattr, attr_len);
 	iomap->type = IOMAP_INLINE;
-	iomap->inline_data = kattr;
+	iomap->inline_data = page_address(ipage);
 	iomap->offset = 0;
 	/* iomap requires there is only one INLINE_DATA extent */
 	iomap->length = attr_len;
-	iomap->private = mrec_ni;
+	iomap->private = ipage;
 
 out:
 	if (ctx)
 		ntfs_attr_put_search_ctx(ctx);
-	if (err)
-		mutex_unlock(&mrec_ni->mrec_lock);
+	mutex_unlock(&mrec_ni->mrec_lock);
 	return err;
 }
 
@@ -975,10 +984,44 @@ static int ntfs_write_iomap_end_resident(struct inode *inode, loff_t pos,
 					 loff_t length, ssize_t written,
 					 unsigned int flags, struct iomap *iomap)
 {
-	struct ntfs_inode *base_ni = iomap->private;
+	struct ntfs_inode *ni = NTFS_I(inode);
+	struct ntfs_inode *mrec_ni = ntfs_inode_is_named_stream(ni) ?
+			ntfs_base_inode(ni) : ni;
+	struct ntfs_attr_search_ctx *ctx;
+	u32 attr_len;
+	int err;
+	char *kattr;
+	struct page *ipage = iomap->private;
 
-	mark_mft_record_dirty(base_ni);
-	mutex_unlock(&base_ni->mrec_lock);
+	mutex_lock(&mrec_ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(mrec_ni, NULL);
+	if (!ctx) {
+		written = -ENOMEM;
+		goto err_out;
+	}
+
+	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len,
+			       CASE_SENSITIVE, 0, NULL, 0, ctx);
+	if (err) {
+		if (err == -ENOENT)
+			err = -EIO;
+		written = err;
+		goto err_out;
+	}
+
+	/* The total length of the attribute value. */
+	attr_len = le32_to_cpu(ctx->attr->data.resident.value_length);
+	if (pos >= attr_len || pos + written > attr_len)
+		goto err_out;
+
+	kattr = (u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset);
+	memcpy(kattr + pos, iomap_inline_data(iomap, pos), written);
+	mark_mft_record_dirty(ctx->ntfs_ino);
+err_out:
+	if (ctx)
+		ntfs_attr_put_search_ctx(ctx);
+	put_page(ipage);
+	mutex_unlock(&mrec_ni->mrec_lock);
 	return written;
 }
 
