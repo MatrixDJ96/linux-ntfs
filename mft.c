@@ -1942,8 +1942,6 @@ static int ntfs_mft_bitmap_extend_allocation_nolock(struct ntfs_volume *vol)
 		put_page(page);
 #endif
 		up_write(&vol->lcnbmp_lock);
-		goto alloc_cluster;
-	}
 alloc_cluster:
 		/* Allocate a cluster from the DATA_ZONE. */
 		rl2 = ntfs_cluster_alloc(vol, rl[1].vcn, 1, lcn, DATA_ZONE,
@@ -1975,6 +1973,7 @@ alloc_cluster:
 		/* Find the last run in the new runlist. */
 		for (; rl[1].length; rl++)
 			;
+	}
 	/*
 	 * Update the attribute record as well.  Note: @rl is the last
 	 * (non-terminator) runlist element of mft bitmap.
